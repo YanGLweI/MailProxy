@@ -15,3 +15,8 @@ target/
 # Environment
 .env
 .env.local
+
+# MailProxy
+/mailproxy
+/config.yaml
+/certs/
