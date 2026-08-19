@@ -307,6 +307,55 @@ func TestNoneModeRelay(t *testing.T) {
 	}
 }
 
+// loginAuth 是 net/smtp 缺失的 LOGIN 机制客户端实现，仅用于测试。
+type loginAuth struct{ username, password string }
+
+func (a *loginAuth) Start(*smtp.ServerInfo) (string, []byte, error) { return "LOGIN", nil, nil }
+
+func (a *loginAuth) Next(fromServer []byte, more bool) ([]byte, error) {
+	if !more {
+		return nil, nil
+	}
+	switch strings.ToLower(string(fromServer)) {
+	case "username:":
+		return []byte(a.username), nil
+	case "password:":
+		return []byte(a.password), nil
+	}
+	return nil, fmt.Errorf("意外的 LOGIN 挑战: %q", fromServer)
+}
+
+// 模式A：兼容强制发起 AUTH 的客户端，任意凭据被接受并忽略，不影响转发。
+func TestNoneModeIgnoresAuth(t *testing.T) {
+	mock, backendAddr := startMockBackend(t)
+	addr, stop := startProxy(t, proxyConfig(backendAddr, config.ModeNone))
+	defer stop()
+
+	// AUTH PLAIN + 随机凭据
+	c := dialProxy(t, addr)
+	if err := c.Auth(smtp.PlainAuth("", "random-user", "random-pass", "127.0.0.1")); err != nil {
+		t.Fatal("none 模式应接受任意 PLAIN 凭据:", err)
+	}
+	if err := sendMail(t, c, "sender@example.com", []string{"rcpt@example.com"}, testBody); err != nil {
+		t.Fatal("发送失败:", err)
+	}
+	c.Close()
+
+	// AUTH LOGIN + 随机凭据
+	c = dialProxy(t, addr)
+	defer c.Close()
+	if err := c.Auth(&loginAuth{"random-user", "random-pass"}); err != nil {
+		t.Fatal("none 模式应接受任意 LOGIN 凭据:", err)
+	}
+	if err := sendMail(t, c, "sender@example.com", []string{"rcpt@example.com"}, testBody); err != nil {
+		t.Fatal("发送失败:", err)
+	}
+
+	if n := len(mock.recorded()); n != 2 {
+		t.Fatalf("mock 后端应收到 2 封邮件, got %d", n)
+	}
+}
+
 // 模式B：代理账号登录并映射后端；错误密码被拒绝。
 func TestAuthModeAccountMapping(t *testing.T) {
 	mock, backendAddr := startMockBackend(t)

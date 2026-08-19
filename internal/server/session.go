@@ -35,11 +35,12 @@ func (s *Server) newSession(c *smtp.Conn) (smtp.Session, error) {
 	if cfg.Auth.Mode == config.ModeAuth {
 		return &authSession{session: ses}, nil
 	}
-	return ses, nil
+	return &noopAuthSession{session: ses}, nil
 }
 
 // session 实现 smtp.Session，处理 RSET/MAIL FROM/RCPT TO/DATA/QUIT。
-// mode=none 时不实现 AuthSession 接口，即不对外宣告 AUTH 能力。
+// mode=none 时由 noopAuthSession 包装，接受并忽略任意 AUTH；
+// mode=auth 时由 authSession 包装，做真实代理账号认证。
 type session struct {
 	srv      *Server
 	clientIP string
@@ -240,4 +241,65 @@ func (a *authSession) Auth(mech string) (sasl.Server, error) {
 		a.srv.logger.Info("代理账号登录成功", "proxy_account", username, "client_ip", a.clientIP)
 		return nil
 	}), nil
+}
+
+// noopAuthSession 在 mode=none 时为会话附加“接受并忽略”的 AUTH 能力：
+// 对外宣告 PLAIN/LOGIN 并接受任意凭据，兼容不协商 EHLO 能力、强制发起 AUTH 的客户端。
+// 凭据不校验、不写入 authUser，转发仍固定走 default_backend。
+type noopAuthSession struct {
+	*session
+}
+
+var _ smtp.AuthSession = (*noopAuthSession)(nil)
+
+func (n *noopAuthSession) AuthMechanisms() []string {
+	return []string{"PLAIN", "LOGIN"}
+}
+
+func (n *noopAuthSession) Auth(mech string) (sasl.Server, error) {
+	accept := func(username string) {
+		n.srv.logger.Debug("mode=none 忽略客户端 AUTH",
+			"mechanism", mech, "username", username, "client_ip", n.clientIP)
+	}
+	switch mech {
+	case "PLAIN":
+		return sasl.NewPlainServer(func(identity, username, password string) error {
+			accept(username)
+			return nil
+		}), nil
+	case "LOGIN":
+		return &loginServer{accept: accept}, nil
+	}
+	return nil, smtp.ErrAuthUnknownMechanism
+}
+
+// loginServer 是 SASL LOGIN 机制的最小服务端实现（go-sasl 仅提供客户端），
+// 配合 noopAuthSession 接受任意凭据。
+type loginServer struct {
+	step   int
+	user   string
+	accept func(username string)
+}
+
+func (l *loginServer) Next(response []byte) (challenge []byte, done bool, err error) {
+	switch l.step {
+	case 0: // AUTH LOGIN，initial response 可能直接携带用户名
+		if response == nil {
+			l.step = 1
+			return []byte("Username:"), false, nil
+		}
+		l.user = string(response)
+		l.step = 2
+		return []byte("Password:"), false, nil
+	case 1: // 客户端发送用户名
+		l.user = string(response)
+		l.step = 2
+		return []byte("Password:"), false, nil
+	case 2: // 客户端发送密码，认证结束
+		l.step = 3
+		l.accept(l.user)
+		return nil, true, nil
+	default:
+		return nil, true, sasl.ErrUnexpectedClientResponse
+	}
 }
