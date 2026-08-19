@@ -36,7 +36,7 @@ GOOS=linux GOARCH=amd64 go build -o mailproxy .
 ## 快速开始
 
 ```bash
-# 1. 生成自签名证书（内网使用；业务程序需信任 certs/server.crt）
+# 1. 生成自签名证书（仅供快速跑通；生产建议替换为自有 CA/公共 CA 证书，见「SSL 证书」）
 ./deploy/gen-cert.sh
 
 # 2. 准备配置
@@ -91,6 +91,92 @@ systemctl enable --now mailproxy
 
 `deploy/mailproxy.service` 已通过 `AmbientCapabilities=CAP_NET_BIND_SERVICE` 解决非 root 绑定 465 特权端口的问题（请确保以 root 启动 unit，capability 会下发给服务用户）。
 
+## RPM 打包部署（RHEL/CentOS/Rocky 系）
+
+构建（macOS 本机即可，依赖 Go 与 Docker，无需 Linux 环境）：
+
+```bash
+bash deploy/build-rpm.sh        # 产物 dist/mailproxy-<version>-1.el*.x86_64.rpm
+```
+
+安装（目标服务器，root）：
+
+```bash
+rpm -ivh mailproxy-1.0.0-1.el9.x86_64.rpm
+```
+
+安装时自动完成：
+
+- 创建系统用户/组 `mailproxy`（nologin）
+- 自动生成自签名 TLS 证书到 `/etc/mailproxy/certs/`，供服务快速启动；**生产环境建议替换为自有 CA 或公共 CA 签发的证书**，见下方「SSL 证书」
+- 安装配置到 `/etc/mailproxy/config.yaml`（权限 640 root:mailproxy，服务用户经组权限可读）、systemd unit 到 `/usr/lib/systemd/system/`
+- 设置开机自启（`systemctl enable`），但**不启动**服务
+
+安装完成后按终端提示操作：
+
+```bash
+vim /etc/mailproxy/config.yaml      # 填写后端邮箱账号/授权码、IP 白名单等
+systemctl start mailproxy           # 手动启动
+systemctl status mailproxy          # 查看状态
+```
+
+升级与卸载：
+
+```bash
+rpm -Uvh mailproxy-<new>.rpm        # 升级；已修改的 config.yaml 不被覆盖（新版落地为 config.yaml.rpmnew），证书不重置
+rpm -e mailproxy                    # 卸载：停止并禁用服务、删除 mailproxy 用户；config.yaml 按 rpm 惯例保留
+```
+
+打包相关文件：`deploy/mailproxy.spec`、`deploy/build-rpm.sh`、`deploy/rpm/`（rpm 专用配置与 unit 模板）。
+
+## SSL 证书
+
+### 安装自动生成自签名证书
+
+为开箱即用，**RPM 安装时会自动生成自签名证书**（手工部署则执行 `deploy/gen-cert.sh`），服务可立即启动。但自签名证书不在任何客户端的默认信任链中，每个接入的业务平台都要单独导入证书才能通过 TLS 校验。
+
+**生产环境建议替换为自己企业 CA 或公共 CA 签发的证书**：
+
+- 企业 CA：把根 CA 证书一次性导入各业务平台信任库后，后续证书续期、轮换业务侧零改动
+- 公共 CA（如 Let's Encrypt、DigiCert 等）：绝大多数客户端默认信任，业务平台通常无需任何配置
+
+### 替换步骤
+
+1. 用 CA 签发服务器证书，**SAN 必须包含业务程序实际连接所用的主机名**（与 `server.hostname` 一致），否则客户端主机名校验会失败
+2. 若由中间 CA 签发，把中间证书拼接到服务器证书后面（叶子证书在前）再写入 `server.crt`，MailProxy 会随握手下发完整证书链：
+
+   ```bash
+   cat your_server.crt intermediate.crt > server.crt
+   ```
+
+3. 覆盖证书文件并设置权限（服务以非 root 用户运行，须保证服务用户可读）：
+
+   ```bash
+   # RPM 安装环境
+   cp server.crt /etc/mailproxy/certs/server.crt
+   cp server.key /etc/mailproxy/certs/server.key
+   chmod 644 /etc/mailproxy/certs/server.crt
+   chmod 600 /etc/mailproxy/certs/server.key
+   chown root:mailproxy /etc/mailproxy/certs/server.*
+   systemctl restart mailproxy      # 证书变更需重启，kill -HUP 热加载不生效
+   ```
+
+### 第三方业务平台信任证书
+
+业务平台通过 465（SSL）连接代理时会校验服务端证书。使用自签名证书时，常见报错：Java 程序报 `PKIX path building failed` / `unable to find valid certification path`，其他平台报「证书不受信任」「SSL 握手失败」等。按优先级选择处理方式：
+
+1. **（推荐）换用业务平台已信任的 CA 签发的证书**——企业内统一分发了根 CA 的用自有 CA，否则用公共 CA 证书，业务平台零配置或仅导入一次根证书
+2. **把证书导入业务平台的信任库**——自签名证书导入 `server.crt` 本身；CA 签发证书导入其**根 CA 证书**（而非服务器证书，这样换证书后无需再动业务侧）。Java 平台示例（如 EventLog Analyzer 等自带 JRE 的产品，导入其 JRE 的 cacerts）：
+
+   ```bash
+   keytool -importcert -alias mailproxy -file server.crt \
+     -keystore $APP_HOME/jre/lib/security/cacerts -storepass changeit
+   ```
+
+3. **关闭业务平台的证书校验**——仅作为临时手段，存在中间人风险，生产不建议
+
+注意：证书更新/轮换后，凡是按方式 2 单独导入过证书的平台都需要重新导入，这也是建议改用 CA 证书的主要原因。
+
 ## 业务程序接入
 
 只需把业务程序的 SMTP 服务器改为本代理：
@@ -98,7 +184,7 @@ systemctl enable --now mailproxy
 - SMTP 地址：代理服务器 IP
 - 端口：465（SSL）
 - 认证：`auth.mode: auth` 时填配置中的代理账号/密码；`none` 时任意填写或留空（代理接受并忽略任意 AUTH）
-- 自签证书：业务程序需信任代理证书，或按既有方式处理证书校验
+- SSL 证书：自签名证书需业务平台单独导入信任；建议直接使用自有 CA/公共 CA 证书，详见「SSL 证书」章节
 
 ## 设计约束（基础版）
 
@@ -113,9 +199,9 @@ systemctl enable --now mailproxy
 ## 风险与注意事项
 
 1. **465 特权端口**：Linux 下需 root 或 `cap_net_bind_service` 能力（systemd unit 已处理）
-2. **SSL 证书**：内网自签名证书需业务程序信任，否则 SSL 握手失败
+2. **SSL 证书**：安装自动生成的自签名证书需各业务平台逐一导入信任，否则 SSL 握手失败；生产建议替换为自有 CA 或公共 CA 签发的证书（见「SSL 证书」）
 3. **服务商限制**：第三方邮箱的发送频率/额度限制无法绕过，超限错误会透传给业务程序
-4. **密码安全**：配置文件保存授权码明文（预留加密存储扩展点），务必限制文件权限为 600
+4. **密码安全**：配置文件保存授权码明文（预留加密存储扩展点），务必限制文件权限（手工部署 `chmod 600`；rpm 安装为 `640 root:mailproxy`，服务用户需经组权限读取）
 
 ## 测试
 
