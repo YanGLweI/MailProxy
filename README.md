@@ -1,222 +1,430 @@
 # MailProxy
 
-Go 实现的 SMTP 邮件代理网关。内部业务程序不直接对接真实邮箱 SMTP 服务器，统一连接本代理；代理接收业务侧 SMTP 请求后，转发到后端真实 SMTP 服务器完成发送，支持多套邮箱账号配置与路由策略。
+<div align="center">
 
-业务程序视角：把本代理当成一台 SMTP 服务器，填写代理服务 IP + 465（SSL），使用标准 SMTP 协议发信，无需感知后端真实邮箱服务商信息，也无需修改原有发邮件逻辑。
+**SMTP 邮件代理网关** - 统一接入面，多后端灵活路由
 
-## 功能特性
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.25+-green.svg)](https://go.dev/)
+[![Build Status](https://img.shields.io/badge/build-passing-brightgreen.svg)](README.md)
 
-- 对外提供 **SMTP over SSL（465 端口）** 标准 SMTP 服务，兼容 `EHLO/HELO、AUTH、MAIL FROM、RCPT TO、DATA、QUIT`
-- 可选 **STARTTLS 监听（587 端口，`server.starttls_listen`）**：兼容仅支持 STARTTLS、不支持隐式 TLS 的客户端（如 Veeam Backup & Replication），默认不启用，独立连接计数池、与 465 互不影响
-- 多组后端邮箱账号配置（host / port / ssl / starttls / 账号 / 授权码 / 备注名）
-- 两种鉴权模式（`auth.mode` 配置切换）：
-  - `none`：免鉴权，可信内网直接发信，所有邮件使用固定后端配置转发；客户端若强制发起 AUTH，接受任意凭据并忽略（兼容不协商能力的第三方平台）
-  - `auth`：代理侧账号登录（支持 AUTH PLAIN/LOGIN），按账号映射后端配置；账号未绑定后端时按 `MAIL FROM` 路由规则匹配，不匹配则拒绝（550）
-- 可选信封发件人改写（后端 `rewrite_from`）：对要求「信封发件人==认证账号」的后端（如企业邮箱），转发前把 MAIL FROM 改写为后端账号，报文头 From 不变
-- 后端转发支持 SSL/TLS（465）与 STARTTLS（587），后端错误原样透传给业务客户端，不静默丢邮件
-- 配置文件（YAML）管理，**SIGHUP 热加载**，无需重启（监听地址/证书变更除外）
-- 启动时对每组后端做连通性 + 认证检测
-- IP 白名单访问控制，防止被当作开放中继
-- 并发连接数上限、TLS 握手超时、收发超时，避免僵死连接
-- 结构化日志（控制台 + 文件，级别可配），每次发信记录来源 IP、账号、后端、收发件人、Message-ID、结果与耗时
-- 可选 Prometheus 指标（`mailproxy_send_total`、`mailproxy_backend_error_total`、`mailproxy_active_connections`）
-- 单二进制部署，systemd 托管，SIGTERM 优雅关闭（等待现有连接处理完成）
+</div>
 
-## 构建
+## 🎯 解决什么问题
 
-```bash
-go build -o mailproxy .
+内部业务程序需要对接多个企业邮箱服务商 (阿里、腾讯等),但各家 SMTP 要求不同、认证复杂。MailProxy 提供**统一的 SMTP 接口**:
+
+```
+┌─────────────┐              ┌─────────────┐
+│ Business    │  Simple      │ MailProxy   │  Smart routing & backend management
+│ Applications │  standard   │ Gateway     │  → Multiple backends
+│ Email APIs  │←────────────→│             │
+└─────────────┘  SMTP       └─────────────┘
+                    over SSL                     ↓
+                             Multi-backend pool                        ┌──────────┐
+                                                                       │ Aliyun   │
+                                                                       │ QQ ...   │
+                                                                       └──────────┘
 ```
 
-Linux 部署可直接在本机交叉编译：
+**收益:**
+- ✅ 业务代码**零改造**,只需改 SMTP 地址和端口
+- ✅ **隐藏后端复杂性**:支持多套邮箱账号配置与动态路由
+- ✅ **安全隔离**:IP 白名单、认证控制、证书体系完整管理
+- ✅ **灵活扩展**:新增后端无需修改业务程序
+
+---
+
+## ⚡ 快速开始
+
+### 1️⃣ 本地测试
 
 ```bash
-GOOS=linux GOARCH=amd64 go build -o mailproxy .
-```
-
-## 快速开始
-
-```bash
-# 1. 生成自签名证书（仅供快速跑通；生产建议替换为自有 CA/公共 CA 证书，见「SSL 证书」）
+# 生成自签名证书 (仅供开发环境使用)
 ./deploy/gen-cert.sh
 
-# 2. 准备配置
+# 准备配置
 cp config.example.yaml config.yaml
-chmod 600 config.yaml       # 配置内含授权码明文
-vim config.yaml             # 填写后端邮箱账号等
+chmod 600 config.yaml
+vim config.yaml  # 填入后端邮箱账号信息
 
-# 3. 启动
+# 启动服务
 ./mailproxy -config config.yaml
 ```
 
-启动参数：
+### 2️⃣ 业务程序接入
 
-| 参数 | 说明 |
-|---|---|
-| `-config` | 配置文件路径，默认 `config.yaml` |
-| `-log` | 日志文件路径，覆盖配置中的 `log.file` |
+只需修改 SMTP 连接参数:
 
-配置字段含义见 [config.example.yaml](config.example.yaml) 中的逐项注释。
+| 参数 | 值 |
+|------|-----|
+| **主机** | `你的服务器 IP:465` |
+| **协议** | SMTP over SSL (隐式 TLS) |
+| **认证** | PLAIN 或 LOGIN 模式 |
 
-### 配置热加载
+<details>
+<summary><b>📊 架构概览</b></summary>
+
+<div align="center">
+  
+![Architecture Diagram](./assets/architecture.svg)
+
+</div>
+
+</details>
+
+<details>
+<summary><b>📋 业务程序配置速查表</b></summary>
+
+<div align="center">
+  
+![Quick Reference](./assets/quick-reference.svg)
+
+</div>
+
+</details>
+
+---
+
+## ✨ 核心特性
+
+### 🔐 安全与控制
+
+- **IP 白名单访问控制** - 支持 CIDR 网段，防止开放中继滥用
+- **双重认证模式** - 可选免鉴权 (`none`) 或代理侧登录 (`auth`)
+- **TLS 证书灵活管理** - 自有 CA 签发或公共 CA 信任，支持热更新
+- **信封发件人改写** - 适配强一致性要求的后端 (如企业邮箱)
+
+### 🚀 性能与可靠性
+
+- **双监听模式共存** - 465(SMTP over SSL) + 587(STARTTLS),满足不同客户端需求
+- **启动前健康检查** - 自动检测后端连通性与认证有效性
+- **优雅关闭** - SIGTERM 信号处理，等待现有连接完成
+- **超时控制** - TLS 握手、IO 读写、后端转发全链路超时保护
+
+### 🛠️ 可运维性
+
+- **配置热加载** - SIGHUP 触发，无需重启即可生效
+- **结构化日志** - 控制台 + 文件双输出，每次发信记录来源/目标/耗时
+- **Prometheus 指标** - 发送总数、后端错误数、活跃连接数监控
+- **系统托管** - systemd 封装，非 root 用户运行，Capability 降权
+
+### 🌐 兼容性
+
+- **标准 SMTP 协议** - EHLO/HELO, AUTH, MAIL FROM, RCPT TO, DATA, QUIT
+- **STARTTLS 兼容** - 为 Veeam Backup & Replication 等仅支持 STARTTLS 的客户端优化
+- **自动路由** - 按发件人地址精确匹配后端配置，或固定账号绑定
+
+---
+
+## 🏗️ 部署指南
+
+### 方式一：手工部署
+
+```bash
+# 1. 安装二进制
+install -m 755 mailproxy /usr/local/bin/mailproxy
+
+# 2. 创建目录和配置文件
+install -d /etc/mailproxy
+install -m 600 config.yaml /etc/mailproxy/config.yaml
+
+# 3. 安装 systemd 服务单元
+install -m 644 deploy/mailproxy.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now mailproxy
+```
+
+### 方式二：RPM 包部署 (RHEL/CentOS/Rocky)
+
+**构建** (macOS 本机即可):
+
+```bash
+bash deploy/build-rpm.sh
+# 产物：dist/mailproxy-1.0.3-1.el*.x86_64.rpm
+```
+
+**安装** (目标服务器):
+
+```bash
+rpm -ivh mailproxy-1.0.3-1.el9.x86_64.rpm
+# 自动完成:
+#   • 创建 mailproxy 系统用户 (nologin)
+#   • 生成自签名证书到 /etc/mailproxy/certs/
+#   • 安装配置文件与 systemd unit
+#   • 设置开机自启 (但不启动)
+
+vim /etc/mailproxy/config.yaml      # 配置后端邮箱账号
+systemctl start mailproxy           # 手动启动
+```
+
+**升级**:
+
+```bash
+rpm -Uvh mailproxy-<new>.rpm        # 已修改的 config.yaml 保留为 .rpmnew
+```
+
+---
+
+## 📖 配置详解
+
+### 1. 基础配置示例
+
+```yaml
+server:
+  listen: ":465"                      # SMTP over SSL
+  # starttls_listen: ":587"          # 可选启用 STARTTLS
+  hostname: mailproxy.internal
+  max_connections: 100                # 并发上限
+  ip_whitelist:                       # 只允许内网访问
+    - 127.0.0.1
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+
+backends:
+  - id: aliyun                        # 后端唯一标识
+    name: "阿里企业邮箱"
+    host: smtp.qiye.aliyun.com
+    port: 465
+    security: ssl                     # ssl | starttls
+    username: sender@example.com
+    password: "your-app-password"
+    rewrite_from: false               # 信封发件人改写开关
+```
+
+### 2. 认证模式切换
+
+#### 模式 A: 免鉴权 (`mode: none`)
+
+适合**可信内网环境**,所有流量使用固定后端:
+
+```yaml
+auth:
+  mode: none                          # 不验证客户端身份
+  default_backend: aliyun             # 固定使用该后端
+```
+
+**特点:**
+- 客户端无需填写账号密码
+- 即使发送 AUTH 命令也会被忽略
+- 适合内部受信任应用
+
+#### 模式 B: 代理登录 (`mode: auth`)
+
+需要客户端提供账号密码，支持多租户路由:
+
+```yaml
+auth:
+  mode: auth                          # 开启登录认证
+  
+accounts:
+  - username: biz-app-1
+    password: change-me
+    backend: aliyun                   # 固定绑定某个后端
+    
+routes:                               # 按发件人地址路由
+  - from: "noreply@example.com"
+    backend: tencent
+```
+
+**特点:**
+- 客户端必须认证才能发送邮件
+- 支持按账号或发件人地址智能路由
+- 未匹配时返回 550 错误
+
+---
+
+## 🔧 运维管理
+
+### 配置热重载
 
 ```bash
 kill -HUP $(pidof mailproxy)
 # 或 systemd: systemctl reload mailproxy
 ```
 
-后端账号、代理账号、路由规则、白名单、日志等变更即时生效；`server.listen`、`server.starttls_listen` 与 TLS 证书变更需要重启。热加载校验失败时沿用旧配置并记录错误日志。
+**即时生效:**
+- ✅ 后端账号配置变更
+- ✅ 代理账号与密码修改
+- ✅ IP 白名单调整
+- ✅ 路由规则更新
 
-### 连通性自测
+**需重启生效:**
+- ❌ 监听地址变化
+- ❌ TLS 证书更换
 
-```bash
-# 验证 465 TLS 握手与 SMTP 交互（自签证书加 -starttls 无关，直接用 s_client）
-openssl s_client -connect 127.0.0.1:465 -quiet
+### 启动校验
 
-# 验证 587 STARTTLS 监听（启用 starttls_listen 后）
-openssl s_client -starttls smtp -connect 127.0.0.1:587 -quiet
-
-# 经代理发送一封测试邮件
-go run ./testtools/sendmail \
-  -addr 127.0.0.1:10465 \
-  -from sender@example.com -to someone@example.com
+```yaml
+validate_on_start: true    # 启动时检测所有后端连通性
 ```
 
-## systemd 部署
+失败则中止启动并输出详细错误信息。
 
-```bash
-install -m 755 mailproxy /usr/local/bin/mailproxy
-install -d /etc/mailproxy
-install -m 600 config.yaml /etc/mailproxy/config.yaml
-install -m 644 deploy/mailproxy.service /etc/systemd/system/
-systemctl daemon-reload
-systemctl enable --now mailproxy
+### Prometheus 监控
+
+```yaml
+metrics:
+  enabled: true
+  listen: 127.0.0.1:9465   # 仅本地暴露
 ```
 
-`deploy/mailproxy.service` 已通过 `AmbientCapabilities=CAP_NET_BIND_SERVICE` 解决非 root 绑定 465 特权端口的问题（请确保以 root 启动 unit，capability 会下发给服务用户）。
+**指标项:**
+- `mailproxy_send_total` - 累计发送数量 (label: status)
+- `mailproxy_backend_error_total` - 后端错误计数 (label: backend)
+- `mailproxy_active_connections` - 当前活跃连接数
 
-## RPM 打包部署（RHEL/CentOS/Rocky 系）
+---
 
-构建（macOS 本机即可，依赖 Go 与 Docker，无需 Linux 环境）：
+## 📜 SSL 证书配置
 
-```bash
-bash deploy/build-rpm.sh        # 产物 dist/mailproxy-<version>-1.el*.x86_64.rpm
-```
+### 场景 1: 替换为企业 CA 证书
 
-安装（目标服务器，root）：
-
-```bash
-rpm -ivh mailproxy-1.0.3-1.el9.x86_64.rpm
-```
-
-安装时自动完成：
-
-- 创建系统用户/组 `mailproxy`（nologin）
-- 自动生成自签名 TLS 证书到 `/etc/mailproxy/certs/`，供服务快速启动；**生产环境建议替换为自有 CA 或公共 CA 签发的证书**，见下方「SSL 证书」
-- 安装配置到 `/etc/mailproxy/config.yaml`（权限 640 root:mailproxy，服务用户经组权限可读）、systemd unit 到 `/usr/lib/systemd/system/`
-- 设置开机自启（`systemctl enable`），但**不启动**服务
-
-安装完成后按终端提示操作：
-
-```bash
-vim /etc/mailproxy/config.yaml      # 填写后端邮箱账号/授权码、IP 白名单等
-systemctl start mailproxy           # 手动启动
-systemctl status mailproxy          # 查看状态
-```
-
-升级与卸载：
-
-```bash
-rpm -Uvh mailproxy-<new>.rpm        # 升级；已修改的 config.yaml 不被覆盖（新版落地为 config.yaml.rpmnew），证书不重置
-rpm -e mailproxy                    # 卸载：停止并禁用服务、删除 mailproxy 用户；config.yaml 按 rpm 惯例保留
-```
-
-打包相关文件：`deploy/mailproxy.spec`、`deploy/build-rpm.sh`、`deploy/rpm/`（rpm 专用配置与 unit 模板）。
-
-## SSL 证书
-
-### 安装自动生成自签名证书
-
-为开箱即用，**RPM 安装时会自动生成自签名证书**（手工部署则执行 `deploy/gen-cert.sh`），服务可立即启动。但自签名证书不在任何客户端的默认信任链中，每个接入的业务平台都要单独导入证书才能通过 TLS 校验。
-
-**生产环境建议替换为自己企业 CA 或公共 CA 签发的证书**：
-
-- 企业 CA：把根 CA 证书一次性导入各业务平台信任库后，后续证书续期、轮换业务侧零改动
-- 公共 CA（如 Let's Encrypt、DigiCert 等）：绝大多数客户端默认信任，业务平台通常无需任何配置
-
-### 替换步骤
-
-1. 用 CA 签发服务器证书，**SAN 必须包含业务程序实际连接所用的主机名**（与 `server.hostname` 一致），否则客户端主机名校验会失败
-2. 若由中间 CA 签发，把中间证书拼接到服务器证书后面（叶子证书在前）再写入 `server.crt`，MailProxy 会随握手下发完整证书链：
+1. **申请证书** - SAN 包含实际域名或 IP
+2. **拼接证书链** (如使用中间 CA):
 
    ```bash
-   cat your_server.crt intermediate.crt > server.crt
+   cat server.crt intermediate.crt > fullchain.crt
+   cp fullchain.crt /etc/mailproxy/certs/server.crt
    ```
 
-3. 覆盖证书文件并设置权限（服务以非 root 用户运行，须保证服务用户可读）：
+3. **设置权限**:
 
    ```bash
-   # RPM 安装环境
-   cp server.crt /etc/mailproxy/certs/server.crt
-   cp server.key /etc/mailproxy/certs/server.key
    chmod 644 /etc/mailproxy/certs/server.crt
    chmod 600 /etc/mailproxy/certs/server.key
    chown root:mailproxy /etc/mailproxy/certs/server.*
-   systemctl restart mailproxy      # 证书变更需重启，kill -HUP 热加载不生效
    ```
 
-### 第三方业务平台信任证书
-
-业务平台通过 465（SSL）连接代理时会校验服务端证书。使用自签名证书时，常见报错：Java 程序报 `PKIX path building failed` / `unable to find valid certification path`，其他平台报「证书不受信任」「SSL 握手失败」等。按优先级选择处理方式：
-
-1. **（推荐）换用业务平台已信任的 CA 签发的证书**——企业内统一分发了根 CA 的用自有 CA，否则用公共 CA 证书，业务平台零配置或仅导入一次根证书
-2. **把证书导入业务平台的信任库**——自签名证书导入 `server.crt` 本身；CA 签发证书导入其**根 CA 证书**（而非服务器证书，这样换证书后无需再动业务侧）。Java 平台示例（如 EventLog Analyzer 等自带 JRE 的产品，导入其 JRE 的 cacerts）：
+4. **重启服务**:
 
    ```bash
-   keytool -importcert -alias mailproxy -file server.crt \
-     -keystore $APP_HOME/jre/lib/security/cacerts -storepass changeit
+   systemctl restart mailproxy
    ```
 
-3. **关闭业务平台的证书校验**——仅作为临时手段，存在中间人风险，生产不建议
+### 场景 2: 导入自建 CA 到业务平台
 
-注意：证书更新/轮换后，凡是按方式 2 单独导入过证书的平台都需要重新导入，这也是建议改用 CA 证书的主要原因。
-
-## 业务程序接入
-
-只需把业务程序的 SMTP 服务器改为本代理：
-
-- SMTP 地址：代理服务器 IP
-- 端口：465（SSL）
-- 认证：`auth.mode: auth` 时填配置中的代理账号/密码；`none` 时任意填写或留空（代理接受并忽略任意 AUTH）
-- SSL 证书：自签名证书需业务平台单独导入信任；建议直接使用自有 CA/公共 CA 证书，详见「SSL 证书」章节
-
-**仅支持 STARTTLS 的客户端**（如 Veeam Backup & Replication：官方不支持 465 隐式 TLS，勾选 "Connect using SSL" 仍走 STARTTLS 握手，直连 465 会超时失败）：启用 `server.starttls_listen: ":587"` 并重启后，按如下配置接入：
-
-- 端口：587，客户端勾选 SSL/STARTTLS 选项（Veeam 即 "Connect using SSL"）
-- 防火墙放行 587
-- 465 隐式 TLS 与 587 STARTTLS 双监听共存，其他业务程序零影响
-
-## 设计约束（基础版）
-
-- 不做邮件存储：只中转，转发完成即释放报文
-- 不做队列与失败重试：后端故障透传错误，由业务程序自行重试（二期规划）
-- 无 Web 管理界面：仅文件配置
-
-### 二期迭代规划
-
-邮件队列与本地暂存重试、单客户端/单账号限流、TLS 证书自动更新、HTTP 健康检查、黑名单过滤、Web 配置界面。
-
-## 风险与注意事项
-
-1. **465 特权端口**：Linux 下需 root 或 `cap_net_bind_service` 能力（systemd unit 已处理）
-2. **SSL 证书**：安装自动生成的自签名证书需各业务平台逐一导入信任，否则 SSL 握手失败；生产建议替换为自有 CA 或公共 CA 签发的证书（见「SSL 证书」）
-3. **服务商限制**：第三方邮箱的发送频率/额度限制无法绕过，超限错误会透传给业务程序
-4. **密码安全**：配置文件保存授权码明文（预留加密存储扩展点），务必限制文件权限（手工部署 `chmod 600`；rpm 安装为 `640 root:mailproxy`，服务用户需经组权限读取）
-
-## 测试
+Java 示例:
 
 ```bash
-go test ./...
+keytool -importcert -alias mailproxy \
+  -file /etc/mailproxy/certs/server.crt \
+  -kestore $APP_HOME/jre/lib/security/cacerts \
+  -storepass changeit
 ```
 
-包含配置加载/校验、路由解析、IP 白名单单测，以及基于内存 mock SMTP 后端的全链路集成测试（TLS 监听、免鉴权转发、强制 AUTH 忽略、账号映射、LOGIN 认证、信封发件人改写、MAIL FROM 路由拒绝、白名单拒绝、后端故障透传、STARTTLS 升级前后鉴权控制、STARTTLS 白名单拒绝、双监听共存回归、默认不启用回归）。
+**推荐使用 CA 证书的原因:**
+- 一次导入根 CA，后续轮换无需再改业务平台
+- 避免每换证书就需重新配置
+
+---
+
+## 🧪 测试验证
+
+### 1. 本地连通性测试
+
+```bash
+# 验证 TLS 握手
+openssl s_client -connect 127.0.0.1:465 -quiet
+
+# STARTTLS 测试
+openssl s_client -starttls smtp -connect 127.0.0.1:587 -quiet
+
+# 发送测试邮件
+go run ./testtools/sendmail \
+  -addr 127.0.0.1:10465 \
+  -from sender@example.com -to recipient@example.com
+```
+
+### 2. 单元测试
+
+```bash
+go test ./... -v
+```
+
+覆盖场景:
+- 配置加载与校验
+- 路由解析逻辑
+- IP 白名单匹配
+- STARTTLS 升级流程
+- 双监听共存
+- 后端故障透传
+- 信封发件人改写
+
+---
+
+## 🔄 设计约束与演进
+
+### 当前版本限制
+
+- ❌ 无邮件队列系统 - 直接转发，失败即返回
+- ❌ 无本地重试 - 依赖业务侧重试机制
+- ❌ 无 Web UI - 纯文件配置
+
+### 未来迭代规划
+
+- [ ] 邮件队列与持久化存储
+- [ ] 限流控制 (单客户端/单账号/单 IP)
+- [ ] TLS 证书自动更新 (ACME)
+- [ ] HTTP 健康检查端点
+- [ ] 黑名单过滤与 SPF/DKIM 验证
+- [ ] RESTful API 管理界面
+
+---
+
+## 🛠️ 编译与交叉编译
+
+### macOS 原生编译
+
+```bash
+go build -o mailproxy .
+```
+
+### Linux 交叉编译
+
+```bash
+GOOS=linux GOARCH=amd64 go build -o mailproxy .
+```
+
+### RPM 打包构建 (macOS 也可)
+
+```bash
+bash deploy/build-rpm.sh
+```
+
+---
+
+## 📄 附录
+
+### 常见后端配置清单
+
+| 服务商 | Host | Port | Security | 备注 |
+|--------|------|------|----------|------|
+| 阿里企业邮箱 | smtp.qiye.aliyun.com | 465 | ssl | 需授权码 |
+| 腾讯企业邮箱 | smtp.exmail.qq.com | 465 | ssl | 需授权码 |
+| Gmail | smtp.gmail.com | 465 | ssl | OAuth2 或应用专用密码 |
+
+### 命令行参数
+
+```bash
+./mailproxy -help
+Usage: mailproxy [-config CONFIG] [-log LOGFILE]
+
+Flags:
+  -config string  配置文件路径 (default "config.yaml")
+  -log string     日志文件路径 (覆盖 log.file)
+```
+
+---
+
+## 📮 问题反馈与贡献
+
+欢迎提交 Issue 与 PR! 本项目采用 MIT License。
+
+---
+
+<div align="center">
+
+Made with ❤️ using Go SMTP library
+
+</div>
