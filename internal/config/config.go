@@ -56,7 +56,8 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen           string   `yaml:"listen"` // 对外监听地址，如 ":465"
+	Listen           string   `yaml:"listen"`          // 对外监听地址，如 ":465"
+	StartTLSListen   string   `yaml:"starttls_listen"` // 可选：明文+STARTTLS 监听地址（如 ":587"），供仅支持 STARTTLS 的客户端；留空=不启用
 	Hostname         string   `yaml:"hostname"`
 	TLS              TLSFiles `yaml:"tls"`
 	MaxConnections   int      `yaml:"max_connections"`
@@ -225,6 +226,9 @@ func (c *Config) Validate() error {
 		if _, ok := ids[r.BackendID]; !ok {
 			return fmt.Errorf("route from=%q 引用的 backend %q 不存在", r.From, r.BackendID)
 		}
+	}
+	if c.Server.StartTLSListen != "" && c.Server.StartTLSListen == c.Server.Listen {
+		return fmt.Errorf("server.starttls_listen 不得与 server.listen 相同（%q）", c.Server.Listen)
 	}
 	return nil
 }

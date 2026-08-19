@@ -8,6 +8,9 @@
 server:
   listen: ":465"                  # 对外监听地址，SMTP over SSL。Linux 下 465 为特权端口，
                                   # 需 root 运行或给二进制设置 cap_net_bind_service 能力
+  # starttls_listen: ":587"       # 可选：明文+STARTTLS 监听地址，供仅支持 STARTTLS 的客户端
+                                  # （如 Veeam B&R：不支持 465 隐式 TLS，勾选 "Connect using SSL" 仍走 STARTTLS）；
+                                  # 留空=不启用；启用需防火墙放行对应端口
   hostname: mailproxy.internal    # EHLO 应答中返回的主机名
   tls:                            # 服务端证书，供业务程序与代理之间 SSL 加密通信
     cert: certs/server.crt        # 可用 deploy/gen-cert.sh 生成自签名证书

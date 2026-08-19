@@ -7,6 +7,7 @@ Go 实现的 SMTP 邮件代理网关。内部业务程序不直接对接真实�
 ## 功能特性
 
 - 对外提供 **SMTP over SSL（465 端口）** 标准 SMTP 服务，兼容 `EHLO/HELO、AUTH、MAIL FROM、RCPT TO、DATA、QUIT`
+- 可选 **STARTTLS 监听（587 端口，`server.starttls_listen`）**：兼容仅支持 STARTTLS、不支持隐式 TLS 的客户端（如 Veeam Backup & Replication），默认不启用，独立连接计数池、与 465 互不影响
 - 多组后端邮箱账号配置（host / port / ssl / starttls / 账号 / 授权码 / 备注名）
 - 两种鉴权模式（`auth.mode` 配置切换）：
   - `none`：免鉴权，可信内网直接发信，所有邮件使用固定后端配置转发；客户端若强制发起 AUTH，接受任意凭据并忽略（兼容不协商能力的第三方平台）
@@ -64,13 +65,16 @@ kill -HUP $(pidof mailproxy)
 # 或 systemd: systemctl reload mailproxy
 ```
 
-后端账号、代理账号、路由规则、白名单、日志等变更即时生效；`server.listen` 与 TLS 证书变更需要重启。热加载校验失败时沿用旧配置并记录错误日志。
+后端账号、代理账号、路由规则、白名单、日志等变更即时生效；`server.listen`、`server.starttls_listen` 与 TLS 证书变更需要重启。热加载校验失败时沿用旧配置并记录错误日志。
 
 ### 连通性自测
 
 ```bash
 # 验证 465 TLS 握手与 SMTP 交互（自签证书加 -starttls 无关，直接用 s_client）
 openssl s_client -connect 127.0.0.1:465 -quiet
+
+# 验证 587 STARTTLS 监听（启用 starttls_listen 后）
+openssl s_client -starttls smtp -connect 127.0.0.1:587 -quiet
 
 # 经代理发送一封测试邮件
 go run ./testtools/sendmail \
@@ -102,7 +106,7 @@ bash deploy/build-rpm.sh        # 产物 dist/mailproxy-<version>-1.el*.x86_64.r
 安装（目标服务器，root）：
 
 ```bash
-rpm -ivh mailproxy-1.0.0-1.el9.x86_64.rpm
+rpm -ivh mailproxy-1.0.3-1.el9.x86_64.rpm
 ```
 
 安装时自动完成：
@@ -186,6 +190,12 @@ rpm -e mailproxy                    # 卸载：停止并禁用服务、删除 ma
 - 认证：`auth.mode: auth` 时填配置中的代理账号/密码；`none` 时任意填写或留空（代理接受并忽略任意 AUTH）
 - SSL 证书：自签名证书需业务平台单独导入信任；建议直接使用自有 CA/公共 CA 证书，详见「SSL 证书」章节
 
+**仅支持 STARTTLS 的客户端**（如 Veeam Backup & Replication：官方不支持 465 隐式 TLS，勾选 "Connect using SSL" 仍走 STARTTLS 握手，直连 465 会超时失败）：启用 `server.starttls_listen: ":587"` 并重启后，按如下配置接入：
+
+- 端口：587，客户端勾选 SSL/STARTTLS 选项（Veeam 即 "Connect using SSL"）
+- 防火墙放行 587
+- 465 隐式 TLS 与 587 STARTTLS 双监听共存，其他业务程序零影响
+
 ## 设计约束（基础版）
 
 - 不做邮件存储：只中转，转发完成即释放报文
@@ -209,4 +219,4 @@ rpm -e mailproxy                    # 卸载：停止并禁用服务、删除 ma
 go test ./...
 ```
 
-包含配置加载/校验、路由解析、IP 白名单单测，以及基于内存 mock SMTP 后端的全链路集成测试（TLS 监听、免鉴权转发、强制 AUTH 忽略、账号映射、LOGIN 认证、信封发件人改写、MAIL FROM 路由拒绝、白名单拒绝、后端故障透传）。
+包含配置加载/校验、路由解析、IP 白名单单测，以及基于内存 mock SMTP 后端的全链路集成测试（TLS 监听、免鉴权转发、强制 AUTH 忽略、账号映射、LOGIN 认证、信封发件人改写、MAIL FROM 路由拒绝、白名单拒绝、后端故障透传、STARTTLS 升级前后鉴权控制、STARTTLS 白名单拒绝、双监听共存回归、默认不启用回归）。

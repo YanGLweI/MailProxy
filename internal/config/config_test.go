@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +141,46 @@ routes:
 	}
 	if _, ok := cfg.RouteByFrom("other@e.com"); ok {
 		t.Error("未配置的 from 不应匹配")
+	}
+}
+
+// starttls_listen 为可选字段：留空通过、合法值通过、与 listen 相同报错。
+func TestStartTLSListenValidate(t *testing.T) {
+	// 留空（默认不启用）应通过
+	cfg, err := Load(writeTemp(t, validYAML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.StartTLSListen != "" {
+		t.Fatalf("默认 starttls_listen 应为空, got %q", cfg.Server.StartTLSListen)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal("留空 starttls_listen 应校验通过:", err)
+	}
+
+	// 合法值应通过且正确解析
+	withST := strings.Replace(validYAML, "  listen: \":10465\"",
+		"  listen: \":10465\"\n  starttls_listen: \":10587\"", 1)
+	cfg, err = Load(writeTemp(t, withST))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Server.StartTLSListen != ":10587" {
+		t.Fatalf("starttls_listen 解析错误: %q", cfg.Server.StartTLSListen)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal("合法 starttls_listen 应校验通过:", err)
+	}
+
+	// 与 listen 相同应报错
+	same := strings.Replace(validYAML, "  listen: \":10465\"",
+		"  listen: \":10465\"\n  starttls_listen: \":10465\"", 1)
+	cfg, err = Load(writeTemp(t, same))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("starttls_listen 与 listen 相同时应校验失败")
 	}
 }
 

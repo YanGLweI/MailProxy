@@ -24,6 +24,7 @@ type Server struct {
 	metrics  *metrics.Metrics // 可为 nil（未启用）
 
 	smtp *smtp.Server
+	st   *startTLSRunner // 可选 STARTTLS 监听（未配置时为 nil）
 }
 
 func New(provider *config.Provider, logger *slog.Logger, m *metrics.Metrics) *Server {
@@ -49,6 +50,17 @@ func (s *Server) Run(ctx context.Context) error {
 		"auth_mode", cfg.Auth.Mode,
 		"max_connections", cfg.Server.MaxConnections,
 	)
+
+	// 可选 STARTTLS 监听：独立运行，启动失败仅记日志，不影响主服务
+	st, err := maybeStartStartTLS(s, cfg, tlsCfg)
+	if err != nil {
+		s.logger.Error("STARTTLS 监听启动失败", "listen", cfg.Server.StartTLSListen, "error", err)
+	} else if st != nil {
+		s.st = st
+		go st.serve()
+		s.logger.Info("STARTTLS 监听已启动", "listen", cfg.Server.StartTLSListen)
+	}
+
 	ln = s.wrapListener(ln, cfg.Server.HandshakeTimeout.Duration())
 	return s.smtp.Serve(ln)
 }
@@ -58,7 +70,13 @@ func (s *Server) Stop() error {
 	if s.smtp == nil {
 		return nil
 	}
-	return s.smtp.Shutdown(context.Background())
+	err := s.smtp.Shutdown(context.Background())
+	if s.st != nil {
+		if err2 := s.st.stop(context.Background()); err2 != nil && err == nil {
+			err = err2
+		}
+	}
+	return err
 }
 
 func loadTLSConfig(cfg *config.Config) (*tls.Config, error) {

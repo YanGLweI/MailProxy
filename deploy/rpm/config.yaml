@@ -8,6 +8,9 @@
 server:
   listen: ":465"                  # 对外监听地址，SMTP over SSL。465 为特权端口，
                                   # systemd unit 已通过 CAP_NET_BIND_SERVICE 处理
+  # starttls_listen: ":587"       # 可选：明文+STARTTLS 监听地址，供仅支持 STARTTLS 的客户端
+                                  # （如 Veeam B&R：不支持 465 隐式 TLS，勾选 "Connect using SSL" 仍走 STARTTLS）；
+                                  # 留空=不启用；启用需防火墙放行对应端口
   hostname: mailproxy.internal    # EHLO 应答中返回的主机名
   tls:                            # 服务端证书，rpm 安装时自动生成自签名证书
     cert: /etc/mailproxy/certs/server.crt
