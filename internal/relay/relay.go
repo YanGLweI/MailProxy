@@ -26,18 +26,21 @@ type BackendRef struct {
 	Security string
 	Username string
 	Password string
+	// RewriteFrom 为 true 时由调用方把信封 MAIL FROM 改写为 Username。
+	RewriteFrom bool
 }
 
 // RefFromBackend 从配置结构构造转发引用。
 func RefFromBackend(b config.Backend) BackendRef {
 	return BackendRef{
-		ID:       b.ID,
-		Name:     b.Name,
-		Host:     b.Host,
-		Port:     b.Port,
-		Security: b.Security,
-		Username: b.Username,
-		Password: b.Password,
+		ID:          b.ID,
+		Name:        b.Name,
+		Host:        b.Host,
+		Port:        b.Port,
+		Security:    b.Security,
+		Username:    b.Username,
+		Password:    b.Password,
+		RewriteFrom: b.RewriteFrom,
 	}
 }
 

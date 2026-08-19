@@ -413,6 +413,65 @@ func TestAuthModeFromRouting(t *testing.T) {
 	}
 }
 
+// 模式B：支持 LOGIN 机制登录；错误密码被 535 拒绝。
+func TestAuthModeLogin(t *testing.T) {
+	mock, backendAddr := startMockBackend(t)
+	addr, stop := startProxy(t, proxyConfig(backendAddr, config.ModeAuth))
+	defer stop()
+
+	// 错误密码
+	c := dialProxy(t, addr)
+	err := c.Auth(&loginAuth{"biz1", "wrong"})
+	if err == nil {
+		t.Error("错误密码应认证失败")
+	} else if !strings.Contains(err.Error(), "535") {
+		t.Errorf("期望 535 认证失败, got: %v", err)
+	}
+	c.Close()
+
+	// 正确密码 + 发送
+	c = dialProxy(t, addr)
+	defer c.Close()
+	if err := c.Auth(&loginAuth{"biz1", "secret1"}); err != nil {
+		t.Fatal("LOGIN 认证失败:", err)
+	}
+	if err := sendMail(t, c, "sender@example.com", []string{"rcpt@example.com"}, testBody); err != nil {
+		t.Fatal("发送失败:", err)
+	}
+	if len(mock.recorded()) != 1 {
+		t.Fatal("mock 后端应收到 1 封邮件")
+	}
+}
+
+// rewrite_from=true 时信封 MAIL FROM 改写为后端认证账号，报文头不变。
+func TestRewriteFrom(t *testing.T) {
+	mock, backendAddr := startMockBackend(t)
+	yamlCfg := strings.Replace(proxyConfig(backendAddr, config.ModeAuth),
+		"    security: none",
+		"    security: none\n    rewrite_from: true", 1)
+	addr, stop := startProxy(t, yamlCfg)
+	defer stop()
+
+	c := dialProxy(t, addr)
+	defer c.Close()
+	if err := c.Auth(smtp.PlainAuth("", "biz1", "secret1", "127.0.0.1")); err != nil {
+		t.Fatal("认证失败:", err)
+	}
+	if err := sendMail(t, c, "biz1@corp.com", []string{"rcpt@example.com"}, testBody); err != nil {
+		t.Fatal("发送失败:", err)
+	}
+	mails := mock.recorded()
+	if len(mails) != 1 {
+		t.Fatalf("mock 后端应收到 1 封邮件, got %d", len(mails))
+	}
+	if mails[0].From != "backend-user@example.com" {
+		t.Errorf("信封发件人应改写为后端账号, got %q", mails[0].From)
+	}
+	if !strings.Contains(mails[0].Data, "From: sender@example.com") {
+		t.Errorf("报文头 From 不应被改写: %q", mails[0].Data)
+	}
+}
+
 // IP 白名单外的客户端在 TLS 握手后被拒绝。
 func TestWhitelistDeny(t *testing.T) {
 	_, backendAddr := startMockBackend(t)

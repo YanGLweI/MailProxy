@@ -85,6 +85,9 @@ type Backend struct {
 	Security string `yaml:"security"` // ssl | starttls | none
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	// RewriteFrom 为 true 时，转发前把信封 MAIL FROM 改写为本后端 Username
+	// （不改报文头 From），适配要求「信封发件人==认证账号」的企业邮箱后端。
+	RewriteFrom bool `yaml:"rewrite_from"`
 }
 
 // Account 代理侧登录账号（mode=auth），映射到一组后端配置。

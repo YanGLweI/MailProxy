@@ -29,7 +29,7 @@ auth:
   #   none —— 模式A：代理不做登录认证，可信内网直接发信，
   #           所有邮件统一用 default_backend 指定的后端配置转发；
   #           客户端若强制发起 AUTH，接受任意凭据并忽略（兼容第三方平台）；
-  #   auth —— 模式B：业务程序需用下方 accounts 中的代理账号登录，
+  #   auth —— 模式B：业务程序需用下方 accounts 中的代理账号登录（支持 AUTH PLAIN/LOGIN），
   #           按账号映射后端配置，账号未绑定后端时按 routes 的 MAIL FROM 匹配。
   mode: none
   default_backend: default        # mode=none 时使用的后端配置 id
@@ -42,6 +42,9 @@ backends:                         # 后端真实 SMTP 账号配置，支持多�
     security: ssl                 # ssl=隐式TLS(465) | starttls=明文升级(587) | none=明文(仅测试)
     username: sender@example.com  # 发件邮箱账号
     password: "your-app-password" # 发件邮箱密码/授权码
+    rewrite_from: false           # 为 true 时转发前把信封 MAIL FROM 改写为上方 username
+                                  # （不改报文头 From，收件人可见发件人不变）；
+                                  # 适配要求「信封发件人==认证账号」的后端（如企业邮箱），默认 false
 
 accounts:                         # mode=auth 时的代理侧登录账号
   - username: biz-app-1           # 业务程序连接代理时使用的账号

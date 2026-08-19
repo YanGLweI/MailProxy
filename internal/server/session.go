@@ -110,6 +110,14 @@ func (s *session) Data(r io.Reader) error {
 		return rerr
 	}
 
+	// 部分后端（企业邮箱等）要求信封发件人==认证账号，按需改写 MAIL FROM；
+	// routes 匹配已在 resolveBackend 中用客户端原始 from 完成。
+	if backend.RewriteFrom && from != backend.Username {
+		s.srv.logger.Info("改写信封发件人", "original_from", from,
+			"new_from", backend.Username, "backend", backend.ID)
+		from = backend.Username
+	}
+
 	msgID := relay.MessageID(buf)
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.IOTimeout.Duration())
@@ -214,7 +222,8 @@ func errMsgOf(err error) string {
 	return strings.ReplaceAll(strings.TrimSpace(err.Error()), "\n", " ")
 }
 
-// authSession 在 mode=auth 时为会话附加 SMTP AUTH（PLAIN）能力。
+// authSession 在 mode=auth 时为会话附加 SMTP AUTH（PLAIN/LOGIN）能力，
+// 按配置中的代理账号做真实校验。
 type authSession struct {
 	*session
 }
@@ -222,25 +231,39 @@ type authSession struct {
 var _ smtp.AuthSession = (*authSession)(nil)
 
 func (a *authSession) AuthMechanisms() []string {
-	return []string{"PLAIN"}
+	return []string{"PLAIN", "LOGIN"}
 }
 
 func (a *authSession) Auth(mech string) (sasl.Server, error) {
-	if mech != "PLAIN" {
-		return nil, smtp.ErrAuthUnknownMechanism
+	switch mech {
+	case "PLAIN":
+		return sasl.NewPlainServer(func(identity, username, password string) error {
+			return a.checkCredentials(username, password)
+		}), nil
+	case "LOGIN":
+		return &loginServer{done: a.checkCredentials}, nil
 	}
-	return sasl.NewPlainServer(func(identity, username, password string) error {
-		cfg := a.srv.provider.Get()
-		acct, ok := cfg.AccountByUsername(username)
-		if !ok || subtle.ConstantTimeCompare([]byte(password), []byte(acct.Password)) != 1 {
-			return smtp.ErrAuthFailed
-		}
-		a.mu.Lock()
-		a.authUser = username
-		a.mu.Unlock()
-		a.srv.logger.Info("代理账号登录成功", "proxy_account", username, "client_ip", a.clientIP)
-		return nil
-	}), nil
+	return nil, smtp.ErrAuthUnknownMechanism
+}
+
+// checkCredentials 校验代理账号凭据：失败记 Warn 日志（区分原因）并返回
+// ErrAuthFailed；成功写入 authUser 供后续路由/日志使用。
+func (a *authSession) checkCredentials(username, password string) error {
+	cfg := a.srv.provider.Get()
+	acct, ok := cfg.AccountByUsername(username)
+	if !ok {
+		a.srv.logger.Warn("代理账号认证失败：账号不存在", "username", username, "client_ip", a.clientIP)
+		return smtp.ErrAuthFailed
+	}
+	if subtle.ConstantTimeCompare([]byte(password), []byte(acct.Password)) != 1 {
+		a.srv.logger.Warn("代理账号认证失败：密码不匹配", "username", username, "client_ip", a.clientIP)
+		return smtp.ErrAuthFailed
+	}
+	a.mu.Lock()
+	a.authUser = username
+	a.mu.Unlock()
+	a.srv.logger.Info("代理账号登录成功", "proxy_account", username, "client_ip", a.clientIP)
+	return nil
 }
 
 // noopAuthSession 在 mode=none 时为会话附加“接受并忽略”的 AUTH 能力：
@@ -257,28 +280,28 @@ func (n *noopAuthSession) AuthMechanisms() []string {
 }
 
 func (n *noopAuthSession) Auth(mech string) (sasl.Server, error) {
-	accept := func(username string) {
+	done := func(username, password string) error {
 		n.srv.logger.Debug("mode=none 忽略客户端 AUTH",
 			"mechanism", mech, "username", username, "client_ip", n.clientIP)
+		return nil
 	}
 	switch mech {
 	case "PLAIN":
 		return sasl.NewPlainServer(func(identity, username, password string) error {
-			accept(username)
-			return nil
+			return done(username, password)
 		}), nil
 	case "LOGIN":
-		return &loginServer{accept: accept}, nil
+		return &loginServer{done: done}, nil
 	}
 	return nil, smtp.ErrAuthUnknownMechanism
 }
 
 // loginServer 是 SASL LOGIN 机制的最小服务端实现（go-sasl 仅提供客户端），
-// 配合 noopAuthSession 接受任意凭据。
+// 收齐用户名与密码后调用 done 校验（或忽略），done 返回的错误透传给客户端。
 type loginServer struct {
-	step   int
-	user   string
-	accept func(username string)
+	step int
+	user string
+	done func(username, password string) error
 }
 
 func (l *loginServer) Next(response []byte) (challenge []byte, done bool, err error) {
@@ -297,8 +320,7 @@ func (l *loginServer) Next(response []byte) (challenge []byte, done bool, err er
 		return []byte("Password:"), false, nil
 	case 2: // 客户端发送密码，认证结束
 		l.step = 3
-		l.accept(l.user)
-		return nil, true, nil
+		return nil, true, l.done(l.user, string(response))
 	default:
 		return nil, true, sasl.ErrUnexpectedClientResponse
 	}
