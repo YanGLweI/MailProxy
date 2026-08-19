@@ -1,0 +1,23 @@
+[Unit]
+Description=MailProxy SMTP relay gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mailproxy
+Group=mailproxy
+ExecStart=/usr/bin/mailproxy -config /etc/mailproxy/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartSec=3s
+# 465 为特权端口：非 root 运行需要 CAP_NET_BIND_SERVICE
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+# 日志文件目录（对应配置中的 log.file）
+LogsDirectory=mailproxy
+ConfigurationDirectory=mailproxy
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

@@ -259,15 +259,16 @@ func (c *Config) RouteByFrom(from string) (Route, bool) {
 	return Route{}, false
 }
 
-// WarnIfInsecureFilePerms 检测含明文密码的配置文件权限，过宽时输出告警日志。
+// WarnIfInsecureFilePerms 检测含明文密码的配置文件权限，其他用户可读时输出告警日志。
+// 组可读（如 640 root:mailproxy）是服务以专用组用户运行时的正常形态，不告警。
 func (c *Config) WarnIfInsecureFilePerms(path string, warnf func(format string, args ...any)) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return
 	}
 	perm := info.Mode().Perm()
-	if perm&0o077 != 0 {
-		warnf("配置文件 %s 权限为 %v，其他用户可读，建议执行 chmod 600 %s（配置内含邮箱授权码明文）",
+	if perm&0o007 != 0 {
+		warnf("配置文件 %s 权限为 %v，其他用户可读，建议执行 chmod 640 %s（配置内含邮箱授权码明文）",
 			path, perm, path)
 	}
 }

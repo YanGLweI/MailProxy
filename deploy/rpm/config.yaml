@@ -1,0 +1,69 @@
+# =====================================================================
+# MailProxy RPM 打包用配置文件（安装到 /etc/mailproxy/config.yaml）
+# 配置内含授权码明文，安装后权限为 640（root:mailproxy，服务用户经组权限可读）。
+# 修改后执行 systemctl reload mailproxy 热加载
+# （监听地址、TLS 证书变更需 systemctl restart mailproxy）。
+# =====================================================================
+
+server:
+  listen: ":465"                  # 对外监听地址，SMTP over SSL。465 为特权端口，
+                                  # systemd unit 已通过 CAP_NET_BIND_SERVICE 处理
+  hostname: mailproxy.internal    # EHLO 应答中返回的主机名
+  tls:                            # 服务端证书，rpm 安装时自动生成自签名证书
+    cert: /etc/mailproxy/certs/server.crt
+    key: /etc/mailproxy/certs/server.key
+  max_connections: 100            # 最大并发连接数，超出返回 421，防止服务过载
+  max_message_bytes: 52428800     # 单封邮件大小上限（字节），默认 50MB
+  handshake_timeout: 30s          # TLS 握手超时
+  io_timeout: 120s                # 邮件收发与后端转发超时
+  ip_whitelist:                   # 客户端 IP 白名单，支持单 IP 与 CIDR；
+                                  # 只允许企业内网访问，拒绝外部公网，防止开放中继。
+                                  # 留空 = 不限制（生产环境强烈不建议）
+    - 127.0.0.1
+    - ::1
+    - 10.0.0.0/8
+    - 192.168.0.0/16
+
+auth:
+  # 鉴权模式二选一：
+  #   none —— 模式A：代理不做登录认证，可信内网直接发信，
+  #           所有邮件统一用 default_backend 指定的后端配置转发；
+  #           客户端若强制发起 AUTH，接受任意凭据并忽略（兼容第三方平台）；
+  #   auth —— 模式B：业务程序需用下方 accounts 中的代理账号登录（支持 AUTH PLAIN/LOGIN），
+  #           按账号映射后端配置，账号未绑定后端时按 routes 的 MAIL FROM 匹配。
+  mode: none
+  default_backend: default        # mode=none 时使用的后端配置 id
+
+backends:                         # 后端真实 SMTP 账号配置，支持多组
+  - id: default                   # 唯一标识，供 accounts/routes/default_backend 引用
+    name: "阿里企业邮箱"            # 备注名称，用于区分不同业务场景
+    host: smtp.qiye.aliyun.com    # 后端 SMTP 服务地址
+    port: 465                     # 后端 SMTP 端口（如 465/587）
+    security: ssl                 # ssl=隐式TLS(465) | starttls=明文升级(587) | none=明文(仅测试)
+    username: sender@example.com  # 发件邮箱账号
+    password: "your-app-password" # 发件邮箱密码/授权码
+    rewrite_from: false           # 为 true 时转发前把信封 MAIL FROM 改写为上方 username
+                                  # （不改报文头 From，收件人可见发件人不变）；
+                                  # 适配要求「信封发件人==认证账号」的后端（如企业邮箱），默认 false
+
+accounts:                         # mode=auth 时的代理侧登录账号
+  - username: biz-app-1           # 业务程序连接代理时使用的账号
+    password: change-me           # 业务程序连接代理时使用的密码
+    backend: default              # 该账号固定使用的后端配置 id；
+                                  # 留空则按 routes 的 MAIL FROM 规则路由
+
+routes:                           # MAIL FROM 路由规则（发件人地址精确匹配），
+                                  # 供 mode=auth 且账号未绑定 backend 时使用；
+                                  # 均不匹配时拒绝发送并返回 550
+  - from: "noreply@example.com"
+    backend: default
+
+log:
+  level: info                     # debug | info | warn | error
+  file: /var/log/mailproxy/mailproxy.log  # 日志文件路径，留空仅输出到控制台
+
+metrics:
+  enabled: false                  # 是否暴露 Prometheus 指标
+  listen: 127.0.0.1:9465          # 指标 HTTP 端点，抓取 /metrics
+
+validate_on_start: true           # 启动时对每组 backend 做连通性+认证检测，失败则中止启动
