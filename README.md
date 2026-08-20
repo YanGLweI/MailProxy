@@ -193,10 +193,34 @@ systemctl enable --now mailproxy
 
 ## RPM 打包部署（RHEL/CentOS/Rocky 系）
 
-构建（macOS 本机即可，依赖 Go 与 Docker，无需 Linux 环境）：
+### 构建要求（macOS 本地）
+
+本项目使用 **Go 交叉编译 + Docker** 在 macOS arm64 上构建 RHEL 系列 x86_64 的 rpm 包。构建机需满足以下依赖：
+
+| 软件 | 用途 |
+|---|---|
+| Go 1.25+ | 交叉编译 Linux x86_64 静态二进制（`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`） |
+| Docker 兼容运行时 | rpmbuild 容器化工具；支持 `docker run --platform linux/amd64`（强制 amd64 模拟） |
+
+**macOS arm64 推荐方案**（无原生 Docker 时）:
+
+1. **colima + lima（轻量）**
+   - 下载安装 colima 与 lima，启动 `colima start`
+   - 下载 Docker 静态 CLI（aarch64）并加入 PATH，执行 `docker ps` 验证
+   - Docker Hub 若直连超时，可通过镜像站拉取 Rocky/Alma 镜像（如 `docker.m.daocloud.io`）
+
+2. **Docker Desktop for Mac（完整）**
+   - 直接使用 `docker`，确保开启 QEMU 模拟支持（可运行 amd64 容器）
+
+3. **Podman/Lima（可选）**
+   - 需要额外配置 docker-兼容 CLI 与 amd64 模拟器；脚本中只需保证 `docker` 命令存在即可。
+
+构建脚本会在 macOS 本体交叉编译二进制，并在 `rockylinux:9` 的 amd64 容器中执行 `rpmbuild`，产物为 `dist/mailproxy-<ver>-1.el*.x86_64.rpm`。
+
+### 构建流程
 
 ```bash
-bash deploy/build-rpm.sh        # 产物 dist/mailproxy-<version>-1.el*.x86_64.rpm
+bash deploy/build-rpm.sh        # 产物 dist/mailproxy-1.0.5-1.el9.x86_64.rpm
 ```
 
 安装（目标服务器，root）：
