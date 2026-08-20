@@ -41,6 +41,8 @@ func maybeStartStartTLS(s *Server, cfg *config.Config, tlsCfg *tls.Config) (*sta
 	srv.MaxMessageBytes = cfg.Server.MaxMessageBytes
 	srv.MaxRecipients = 500
 	srv.EnableSMTPUTF8 = true
+	// === 增大最大行长度，支持超大 Base64 编码内容 ===
+	srv.MaxLineLength = 10000 // 从默认的 2000 增大到 10000 字节
 	srv.TLSConfig = tlsCfg // go-smtp 据此通告 STARTTLS 并完成升级
 	// AllowInsecureAuth 保持默认 false：AUTH 仅在 STARTTLS 升级后允许
 
@@ -89,6 +91,9 @@ func (l *stListener) Accept() (net.Conn, error) {
 func (l *stListener) check(conn net.Conn) net.Conn {
 	cfg := l.srv.provider.Get()
 	remote := conn.RemoteAddr().String()
+
+	// === 记录新连接 ===
+	l.srv.logger.Info("STARTTLS: 客户端已连接", "remote", remote)
 
 	// IP 白名单（防开放中继）
 	wlObj, err := acl.NewWhitelist(cfg.Server.IPWhitelist)

@@ -2,6 +2,11 @@
 
 Go 实现的 SMTP 邮件代理网关。统一对接后端邮箱服务商，业务侧只需连接代理服务器即可发信。
 
+[![Release](https://img.shields.io/github/release/YanGLweI/MailProxy.svg?style=flat-square)](https://github.com/YanGLweI/MailProxy/releases)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg?style=flat-square)](LICENSE)
+[![Go Version](https://img.shields.io/badge/go-1.21-blue.svg?style=flat-square)](https://go.dev/)
+[![RPM](https://img.shields.io/badge/RPM-available-brightgreen.svg?style=flat-square)](https://github.com/YanGLweI/MailProxy/releases)
+
 <div align="center">
 
 ## 解决什么问题
@@ -59,56 +64,72 @@ Go 实现的 SMTP 邮件代理网关。统一对接后端邮箱服务商，业�
 
 ## 功能特性
 
-- 对外提供 **SMTP over SSL（465 端口）** 标准 SMTP 服务，兼容 `EHLO/HELO、AUTH、MAIL FROM、RCPT TO、DATA、QUIT`
-- 可选 **STARTTLS 监听（587 端口，`server.starttls_listen`）**：兼容仅支持 STARTTLS、不支持隐式 TLS 的客户端（如 Veeam Backup & Replication），默认不启用，独立连接计数池、与 465 互不影响
-- 多组后端邮箱账号配置（host / port / ssl / starttls / 账号 / 授权码 / 备注名）
-- 两种鉴权模式（`auth.mode` 配置切换）：
-  - `none`：免鉴权，可信内网直接发信，所有邮件使用固定后端配置转发；客户端若强制发起 AUTH，接受任意凭据并忽略（兼容不协商能力的第三方平台）
-  - `auth`：代理侧账号登录（支持 AUTH PLAIN/LOGIN），按账号映射后端配置；账号未绑定后端时按 `MAIL FROM` 路由规则匹配，不匹配则拒绝（550）
-- 可选信封发件人改写（后端 `rewrite_from`）：对要求「信封发件人==认证账号」的后端（如企业邮箱），转发前把 MAIL FROM 改写为后端账号，报文头 From 不变
-- 后端转发支持 SSL/TLS（465）与 STARTTLS（587），后端错误原样透传给业务客户端，不静默丢邮件
-- 配置文件（YAML）管理，**SIGHUP 热加载**，无需重启（监听地址/证书变更除外）
-- 启动时对每组后端做连通性 + 认证检测
-- IP 白名单访问控制，防止被当作开放中继
-- 并发连接数上限、TLS 握手超时、收发超时，避免僵死连接
-- 结构化日志（控制台 + 文件，级别可配），每次发信记录来源 IP、账号、后端、收发件人、Message-ID、结果与耗时
-- 可选 Prometheus 指标（`mailproxy_send_total`、`mailproxy_backend_error_total`、`mailproxy_active_connections`）
-- 单二进制部署，systemd 托管，SIGTERM 优雅关闭（等待现有连接处理完成）
+- 🚀 **高性能** - 基于 Go 并发模型，支持高并发连接
+- 🔒 **安全认证** - IP 白名单 + 可选 AUTH 认证，防止被滥用为开放中继
+- 🔄 **智能路由** - 根据发件人自动选择最优后端账号，提升送达率
+- 🎯 **零代码改造** - 只需修改 SMTP 地址配置，现有发邮件逻辑完全不用变
+- 🔐 **TLS 加密** - 支持 SMTP over SSL (465) 和 STARTTLS (587)，确保传输安全
+- ♻️ **热重载** - 配置文件 SIGHUP 热加载，无需重启服务
+- 📊 **监控指标** - Prometheus 指标导出，实时监控系统状态
+- 📝 **详细日志** - 结构化日志记录，每次发信全流程追踪
+- 🎁 **企业邮箱兼容** - 自动处理「信封发件人必须等于认证账号」限制（阿里/腾讯/网易等）
+- 🏗️ **易部署** - 单二进制文件 + systemd 托管，提供 RPM 包一键安装
 
-## 构建
+---
 
-```bash
-go build -o mailproxy .
-```
-
-Linux 部署可直接在本机交叉编译：
-
-```bash
-GOOS=linux GOARCH=amd64 go build -o mailproxy .
-```
+<br/>
 
 ## 快速开始
 
 ```bash
-# 1. 生成自签名证书（仅供快速跑通；生产建议替换为自有 CA/公共 CA 证书，见「SSL 证书」）
+# 1. 下载最新版本 (Linux AMD64)
+curl -LO https://github.com/YanGLweI/MailProxy/releases/latest/download/mailproxy-1.0.4-linux-amd64.tar.gz
+tar -xzf mailproxy-*.tar.gz
+chmod +x mailproxy
+
+# 或使用 RPM 包 (RHEL/CentOS/Rocky)
+curl -LO https://github.com/YanGLweI/MailProxy/releases/latest/download/mailproxy-1.0.4-1.el9.x86_64.rpm
+sudo rpm -ivh mailproxy-1.0.4-1.el9.x86_64.rpm
+```
+
+**立即体验：**
+
+```bash
+# 生成自签名证书
 ./deploy/gen-cert.sh
 
-# 2. 准备配置
+# 准备配置
 cp config.example.yaml config.yaml
-chmod 600 config.yaml       # 配置内含授权码明文
 vim config.yaml             # 填写后端邮箱账号等
 
-# 3. 启动
+# 启动服务
 ./mailproxy -config config.yaml
 ```
+
+**业务接入只需改 3 个参数：**
 
 **业务接入只需改 3 个参数：**
 
 | 参数 | 修改前                    | 修改后                      |
 |------|---------------------------|-----------------------------|
 | SMTP 主机 | `smtp.qiye.aliyun.com`    | `mailproxy.internal:465`    |
-| SSL 证书 | 逐个管理各服务商证书      | 只需信任 mailproxy 一个证书 |
+| SSL 证书 | 逐个管理各服务商证书      | 只需信任 mailproxy 一个证书 |  
 | 开发成本 | 不同服务商 API 差异适配    | 统一 SMTP 协议，一次开发     |
+
+### 构建源码
+
+如需从源码构建：
+
+```bash
+# 本地构建
+go build -o mailproxy .
+
+# 交叉编译 Linux AMD64
+GOOS=linux GOARCH=amd64 go build -o mailproxy .
+
+# 运行测试
+go test ./...
+```
 
 ### 连通性自测
 

@@ -82,11 +82,23 @@ func (s *Server) Stop() error {
 func loadTLSConfig(cfg *config.Config) (*tls.Config, error) {
 	cert, err := tls.LoadX509KeyPair(cfg.Server.TLS.Cert, cfg.Server.TLS.Key)
 	if err != nil {
-		return nil, fmt.Errorf("加载服务端证书失败: %w", err)
+		return nil, fmt.Errorf("加载服务端证书失败：%w", err)
 	}
+	// === 提升 TLS 兼容性，支持更多加密套件 ===
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
+		// === 允许更广泛的加密套件，提升客户端兼容性 ===
+		CipherSuites: []uint16{
+			tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			tls.TLS_RSA_WITH_AES_128_GCM_SHA256,
+			tls.TLS_RSA_WITH_AES_256_GCM_SHA384,
+		},
+		// === 不需要客户端证书验证 ===
+		ClientAuth: tls.NoClientCert,
 	}, nil
 }
 
@@ -99,6 +111,8 @@ func newSMTPServer(cfg *config.Config, s *Server) *smtp.Server {
 	srv.MaxRecipients = 500
 	srv.AllowInsecureAuth = true // 监听本身已是 TLS；兼容个别不检查 TLS 的旧客户端
 	srv.EnableSMTPUTF8 = true
+	// === 增大最大行长度，支持超大 Base64 编码内容 ===
+	srv.MaxLineLength = 10000 // 从默认的 2000 增大到 10000 字节
 	return srv
 }
 
@@ -143,6 +157,7 @@ func (wl *wrappedListener) check(conn net.Conn) net.Conn {
 		return nil
 	}
 	if err := tlsConn.Handshake(); err != nil {
+		// === 记录详细的 TLS 错误信息，便于调试 ===
 		wl.srv.logger.Warn("TLS 握手失败", "remote", remote, "error", err)
 		conn.Close()
 		return nil

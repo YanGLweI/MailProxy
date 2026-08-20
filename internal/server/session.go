@@ -95,11 +95,21 @@ func (s *session) Data(r io.Reader) error {
 		return &smtp.SMTPError{Code: 503, Message: "Error: need MAIL and RCPT commands"}
 	}
 
+	// === 增强日志记录，便于调试大邮件问题 ===
+	s.srv.logger.Info("开始读取邮件数据", 
+		"from", from,
+		"rcpts_count", len(rcpts),
+		"max_message_bytes", cfg.Server.MaxMessageBytes)
+
 	buf, err := io.ReadAll(io.LimitReader(r, cfg.Server.MaxMessageBytes+1))
 	if err != nil {
+		// === 区分错误类型，便于定位问题 ===
+		s.srv.logger.Warn("读取邮件数据失败", "error", err, "from", from)
 		return smtpErrf(451, "read message data: %v", err)
 	}
 	if int64(len(buf)) > cfg.Server.MaxMessageBytes {
+		s.srv.logger.Warn("邮件超过最大大小限制", 
+			"from", from, "actual_size", len(buf), "max_allowed", cfg.Server.MaxMessageBytes)
 		return &smtp.SMTPError{Code: 552, Message: "Message exceeds maximum size"}
 	}
 
