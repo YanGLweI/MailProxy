@@ -193,26 +193,253 @@ systemctl enable --now mailproxy
 
 ## RPM 打包部署（RHEL/CentOS/Rocky 系）
 
-构建（macOS 本机即可，依赖 Go 与 Docker，无需 Linux 环境）：
+### 快速构建（macOS 本机即可）
 
 ```bash
 bash deploy/build-rpm.sh        # 产物 dist/mailproxy-<version>-1.el*.x86_64.rpm
 ```
 
-安装（目标服务器，root）：
+### 📦 详细构建流程与每步操作指南
+
+如需从头完整了解如何从 macOS 构建 x86_64 Linux RPM 包，请参考以下步骤:
+
+#### 🔧 前置环境与依赖
+
+| 组件 | 要求 | 检查命令 |
+|---|---|---|
+| macOS 芯片 | Apple Silicon (M1/M2/M3) 或 Intel | `uname -m` → arm64 / x86_64 |
+| Go | ≥1.25.0 | `go version` |
+| Homebrew (可选) | 用于安装 lima | `/usr/bin/ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"` (未装过才需要) |
+| curl/tar/git | 系统自带 | `which curl tar git` |
+| 网络 | 可访问 GitHub/Docker Hub(镜像站优先) | `ping github.com` |
+
+#### 🏗️ 阶段一：搭建临时容器环境（约 5 分钟）
+
+**Step 1: 下载 colima 二进制 (ARM64)**
+
+```bash
+mkdir -p ~/bin && \
+curl -sL -o ~/bin/colima \
+    https://github.com/abiosoft/colima/releases/latest/download/colima-Darwin-arm64 && \
+chmod +x ~/bin/colima && \
+~/bin/colima version
+```
+
+**输出示例:**
+```
+colima version v0.10.3
+git commit: ...
+```
+
+**Step 2: 安装 limactl (虚拟化层)**
+
+```bash
+brew install lima
+limactl --version
+```
+
+**输出示例:**
+```
+limactl version 2.2.0
+```
+
+**Step 3: 下载 Docker CLI 静态二进制**
+
+```bash
+mkdir -p ~/docker && \
+curl -sL -o /tmp/docker.tgz \
+    https://download.docker.com/mac/static/stable/aarch64/docker-28.3.3.tgz && \
+tar -xzf /tmp/docker.tgz -C /tmp && \
+cp /tmp/docker/docker ~/docker/ && \
+~/docker/docker version
+```
+
+**输出示例:**
+```
+Client: Docker Engine - Community
+ Version:           28.3.3
+...
+```
+
+**Step 4: 启动 colima 虚拟机并加载镜像**
+
+```bash
+export PATH="$HOME/docker:$PATH"   # 让 colima 找到 docker
+colima start --cpu 2 --memory 4 --disk 20
+```
+
+等待输出:`READY. Run 'limactl shell colima' to open the shell.`
+
+**Step 5: 拉取构建所需镜像 (指定 amd64 平台)**
+
+```bash
+docker pull --platform linux/amd64 rockylinux/rockylinux:9
+```
+
+**提示**:如果直连超时，使用镜像代理:
+```bash
+docker pull --platform linux/amd64 docker.m.daocloud.io/rockylinux/rockylinux:9
+```
+
+#### 📝 阶段二：准备源码与构建脚本
+
+**Step 6: 打开项目目录**
+
+```bash
+cd /Users/yeung/Projects/MailProxy   # 替换为你的项目路径
+cat VERSION                          # 确认版本号 (如 1.0.4)
+```
+
+**Step 7: 查看核心构建脚本**
+
+```bash
+cat deploy/build-rpm.sh
+```
+
+**关键流程:**
+
+1. 读取 VERSION 文件中的版本号
+2. `CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build ...` → 交叉编译 Linux x86_64 静态二进制
+3. 将 spec/specs/source 复制到 `dist/rpmbuild/SOURCES/`
+4. `docker run --platform linux/amd64 rockylinux:9 rpmbuild ...` → 在容器中执行 rpm 构建
+
+#### 🎯 阶段三：一键构建 RPM 包
+
+**Step 8: 直接运行构建脚本**
+
+```bash
+export PATH="$HOME/docker:$PATH"    # 确保找到 docker
+bash deploy/build-rpm.sh
+```
+
+**完整输出示例:**
+```
+==> 交叉编译 Linux x86_64 二进制 (v1.0.4)
+==> 准备打包源文件
+==> Docker 内执行 rpmbuild (rockylinux/rockylinux:9, linux/amd64)
+Building target platforms: x86_64
+Building for target x86_64
+...
+Wrote: /build/RPMS/x86_64/mailproxy-1.0.4-1.el9.x86_64.rpm
+
+==> 构建完成：dist/mailproxy-1.0.4-1.el9.x86_64.rpm
+    安装：rpm -ivh dist/mailproxy-1.0.4-1.el9.x86_64.rpm
+    升级：rpm -Uvh dist/mailproxy-1.0.4-1.el9.x86_64.rpm
+```
+
+**产物位置:**
+- `dist/mailproxy-1.0.4-1.el9.x86_64.rpm`
+- 临时构建目录:`dist/rpmbuild/`(可删除)
+
+#### ✅ 阶段四：验证 RPM 包功能
+
+**Step 9: 创建带 systemd 的测试容器**
+
+```bash
+docker run -d --name mp-test --privileged --tmpfs /run --tmpfs /run/lock \
+    -v $(pwd)/dist:/dist:ro \
+    rockylinux/rockylinux:9 /sbin/init >/dev/null 2>&1
+
+sleep 25 && echo "TEST_CONTAINER_READY"
+```
+
+**Step 10: 执行安装与验证**
+
+```bash
+docker exec mp-test bash -c '
+dnf install -y -q openssl >/dev/null 2>&1
+rpm -i /dist/mailproxy-1.0.4-1.el9.x86_64.rpm >/dev/null 2>&1
+
+echo "=== 文件落位 ==="
+ls -l /etc/mailproxy/config.yaml
+ls -ld /etc/mailproxy/certs
+file /usr/bin/mailproxy
+
+echo "=== 服务状态 ==="
+sed -i "s/^validate_on_start: true/validate_on_start: false/" /etc/mailproxy/config.yaml
+systemctl start mailproxy
+sleep 4
+systemctl is-enabled mailproxy
+systemctl is-active mailproxy
+
+echo "=== 进程检查 ==="
+ps -o user,pid,comm -C mailproxy
+
+echo "=== 端口检查 ==="
+(exec 3<>/dev/tcp/127.0.0.1/465 && echo "PASS:465 端口正常") || echo "FAIL:465 端口异常"
+
+echo "=== 日志 ==="
+tail -5 /var/log/mailproxy/mailproxy.log
+'
+```
+
+**预期成功输出:**
+```
+=== 文件落位 ===
+-rw-r----- 1 root mailproxy 4268 /etc/mailproxy/config.yaml
+drwxr-x--- 2 root mailproxy /etc/mailproxy/certs
+/usr/bin/mailproxy: ELF 64-bit LSB executable, x86-64...
+
+=== 服务状态 ===
+enabled
+active
+
+=== 进程检查 ===
+mailpro+     261 mailproxy
+
+=== 端口检查 ===
+PASS:465 端口正常
+
+=== 日志 ===
+time=... level=INFO msg="MailProxy 启动中"
+time=... level=INFO msg="SMTP over SSL 代理服务已启动" listen=:465
+```
+
+#### 🔄 阶段五：升级回滚与常见问题排查
+
+**Step 11: 升级验证 (新旧版本共存)**
+
+```bash
+# 模拟旧版 1.0.0 安装
+rpm -e mailproxy >/dev/null 2>&1
+rpm -i /dist/mailproxy-1.0.0-1.el9.x86_64.rpm >/dev/null 2>&1
+
+# 手动修改配置后升级新版
+echo "# CUSTOM EDIT" >> /etc/mailproxy/config.yaml
+rpm -U /dist/mailproxy-1.0.4-1.el9.x86_64.rpm >/dev/null 2>&1
+
+# 验证保留
+grep "CUSTOM EDIT" /etc/mailproxy/config.yaml && echo "配置保留 OK"
+[ -f /etc/mailproxy/config.yaml.rpmnew ] && echo "差异配置落地 .rpmnew OK"
+```
+
+**Step 12: 常见问题排查速查表**
+
+| 现象 | 可能原因 | 解决命令 |
+|---|---|---|
+| `启动即退出 exit 1` | 配置文件权限不对 (0600 root:组) | `chmod 640 /etc/mailproxy/config.yaml` |
+| `open server.crt: permission denied` | certs 目录属主 root:root | `chown root:mailproxy /etc/mailproxy/certs` |
+| `Backend SMTP 连通性检测失败` | 授权码无效/网络不通 | `validate_on_start: false` 跳过检测 |
+| `Docker 拉取镜像超时` | 国内网络问题 | `docker pull --platform linux/amd64 docker.m.daocloud.io/rockylinux/rockylinux:9` |
+| `rpmbuild: failed to stat ... No such file or directory` | Docker 挂载卷不可见 | 确保主机 HOME 目录挂载到 VM(使用 colima default) |
+| `colima: dependency check failed for docker` | PATH 中找不到 docker | `export PATH="$HOME/docker:$PATH"; colima start` |
+
+### 基础安装与部署
+
+安装（目标服务器，root）:
 
 ```bash
 rpm -ivh mailproxy-1.0.3-1.el9.x86_64.rpm
 ```
 
-安装时自动完成：
+安装时自动完成:
 
 - 创建系统用户/组 `mailproxy`（nologin）
 - 自动生成自签名 TLS 证书到 `/etc/mailproxy/certs/`，供服务快速启动；**生产环境建议替换为自有 CA 或公共 CA 签发的证书**，见下方「SSL 证书」
 - 安装配置到 `/etc/mailproxy/config.yaml`（权限 640 root:mailproxy，服务用户经组权限可读）、systemd unit 到 `/usr/lib/systemd/system/`
 - 设置开机自启（`systemctl enable`），但**不启动**服务
 
-安装完成后按终端提示操作：
+安装完成后按终端提示操作:
 
 ```bash
 vim /etc/mailproxy/config.yaml      # 填写后端邮箱账号/授权码、IP 白名单等
@@ -220,7 +447,7 @@ systemctl start mailproxy           # 手动启动
 systemctl status mailproxy          # 查看状态
 ```
 
-升级与卸载：
+升级与卸载:
 
 ```bash
 rpm -Uvh mailproxy-<new>.rpm        # 升级；已修改的 config.yaml 不被覆盖（新版落地为 config.yaml.rpmnew），证书不重置
